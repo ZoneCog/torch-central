@@ -48,6 +48,12 @@ end
 local function include(file, depth)
    paths.dofile(file, 3 + (depth or 0))
 end
+
+-- Load cognitive architecture modules
+include('CognitiveGrammar.lua')
+include('AgenticNode.lua') 
+include('MemorySubsystem.lua')
+include('TaskOrchestrator.lua')
 rawset(_G, 'include', include)
 
 function torch.include(package, file)

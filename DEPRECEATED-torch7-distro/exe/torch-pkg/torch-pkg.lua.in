@@ -1,0 +1,593 @@
+-- some dependencies
+require 'paths'
+require 'torch'
+
+-- some paths
+tmp = paths.concat(paths.home,'.torch','torch-pkg')
+
+-- torch cmake config
+cmake_conf = {
+   CMAKE_INSTALL_PREFIX = paths.install_prefix
+}
+
+-- some commands
+mkdir = 'mkdir -p '
+rm = 'rm -rf '
+cd = 'cd '
+cp = 'cp '
+cmake = 'CMAKE_PREFIX_PATH=' .. paths.install_prefix .. ' cmake .. '
+for var,val in pairs(cmake_conf) do
+   cmake = cmake .. '-D' .. var .. '=' .. val .. ' '
+end
+configure = mkdir .. 'build; ' .. cd .. 'build; ' .. cmake
+make = 'make'
+install = 'make install'
+
+-- shortcuts
+append = table.insert
+error = function(msg) print('ERROR: ' .. msg) end
+info = function(msg) print('--> ' .. msg) end
+infoarg = function(msg) print('    ' .. msg) end
+
+-- some binaries
+wget = '@WGET_EXECUTABLE@ ' if wget == '' or wget:find('NOTFOUND') then wget = nil end
+curl = '@CURL_EXECUTABLE@ ' if curl == '' or curl:find('NOTFOUND') then curl = nil end
+git = '@GIT_EXECUTABLE@ '   if git  == '' then git  = nil end
+scp = 'scp '
+if not wget and not curl or not git then
+   error('torch-pkg cannot run without git and one of wget | curl')
+   os.exit()
+end
+
+-- config
+configfile = paths.concat(paths.home, '.torch', 'config.th7')
+if not paths.filep(configfile) then
+   defurls = {
+      'https://raw.github.com/andresy/torch/master/exe/torch-pkg/packages.th7'
+   }
+   os.execute(mkdir .. paths.dirname(configfile))
+   os.execute('echo "pkgconfig = {urls={}}" > ' .. configfile)
+   for _,url in ipairs(defurls) do
+      os.execute('echo "table.insert(pkgconfig.urls, \'' .. url .. '\')" >> ' .. configfile)
+   end
+end
+dofile(configfile)
+
+-- check default config
+if not pkgconfig.urls[1]:find('http://www.torch.ch/resources/packages.th7') then
+   print('\n\27[0;31m')
+   print('warning: your torch-pkg config seems to be outdated')
+   print('please remove "' .. configfile .. '" and reinstall torch')
+   print('\n\27[0m')
+end
+
+-- help/args
+help =
+[=[Torch7 Package Manager
+
+Usage: torch-pkg [options] <command> [argument] [cmake flags]
+
+Supported Commands:
+  help            print this help
+  install         install a package (download + build + deploy)
+  download        download a package locally
+  build           build a local package
+  deploy          deploy a package (build it if necessary)
+  list            list available packages
+  html            generate html page for packages found
+  dok             generate dok file for packages found
+  search          search for a package
+  add             add a server address to local config ($HOME/.torchpkg/config)
+
+Arguments for install|download:
+  <pkg-name>      a package name (to be found in one of the configured repos)
+  <pkg-repo>      the full address of a GIT repository
+  <pkg-url>       the URL of a simple package (should be a tar/tgz/tbz)
+
+Arguments for add:
+  <base-url>      a base URL where GIT repos or tars can be found
+
+CMake flags for install|build
+  VAR=VAL         set a CMake var (ex: torch-pkg install torch WITH_LUA_JIT=1)
+
+Options:
+  -v|-verbose     be more verbose
+  -l|-local       local install
+  -n|-nodeps      do not install dependencies (when installing)
+  -d|-dry         dry run ]=]
+
+-- no args?
+if #arg == 0 then
+   print(help)
+   os.exit()
+end
+
+-- commands
+commands = {'help','install','download','build','deploy','show',
+            'list','html','dok','search','add'}
+
+-- parse arguments
+options = {}
+arguments = {}
+for i,arg in ipairs(arg) do
+   if commandi then
+      append(arguments, arg)
+   end
+   for _,cmd in ipairs(commands) do
+      if arg == cmd then
+         command = arg
+         commandi = i
+         break
+      end
+   end
+end
+for i = 1,#arg do
+   append(options, arg[i])
+end
+
+-- no command?
+if not command then
+   error('invalid command')
+   print(help)
+   os.exit()
+end
+
+-- parse basic options
+for i,opt in ipairs(options) do
+   if opt == '-v' or opt == '-verbose' then
+      verbose = true
+   end
+   if opt == '-d' or opt == '-dry' then
+      dry = true
+   end
+   if opt == '-l' or opt == '-local' then
+      localinstall = true
+      installdir = paths.concat(paths.home,'.torch','usr')
+      configure=configure:gsub('(.*)(CMAKE_INSTALL_PREFIX=)([%w%p]+)(%s*)','mkdir -p '..installdir..'; %1%2'..installdir..'%4')
+   end
+   if opt == '-n' or opt == '-nodeps' then
+      nodeps = true
+   end
+end
+
+-- exec command
+if dry then
+   exec = print
+else
+   if verbose then
+      exec = function(cmd) info('executing: ' .. cmd) os.execute(cmd) end
+   else
+      exec = os.execute
+   end
+end
+
+-- a function to retrieve package lists
+function getpkglist()
+   info('retrieving package lists from servers')
+   exec(mkdir .. tmp)
+   for _,url in ipairs(pkgconfig.urls) do
+      infoarg('url: ' .. url)
+      local file = paths.basename(url)
+      local scp_url = string.match(url, "scp://(.*)")
+      if scp_url then
+         os.execute(rm .. paths.concat(tmp,file))
+         os.execute(cd .. tmp .. '; ' .. scp .. scp_url .. ' .')
+      elseif wget then
+         os.execute(rm .. paths.concat(tmp,file))
+         os.execute(cd .. tmp .. '; ' .. wget .. ' -q ' .. url)
+      else
+         os.execute(rm .. paths.concat(tmp,file))
+         os.execute(curl .. url .. ' -s -o ' .. paths.concat(tmp,file))
+      end
+      if paths.filep(paths.concat(tmp,file)) then
+         dofile(paths.concat(tmp,file))
+      else
+         error('package repository at ' .. url .. ' could not be retrieved')
+         os.exit()
+      end
+   end
+   return pkg
+end
+
+-- pure lua package helpers
+luapack = {}
+function luapack.isvalid(name, path)
+   if name and (name:match('^http%:') or name:match('^https%:')) then
+      name = nil
+   end
+   local luafiles = {}
+   local hasinit
+   for f in paths.files(path) do
+      if not f:match('^%.') then
+         if not f:match('%.lua$') and not f:match('%.txt$') and not f:match('%.md$') then
+            return false
+         end
+         if f:match('%.lua$') then
+            table.insert(luafiles, f)
+            if f == 'init.lua' then
+               hasinit = true
+            end
+         end
+      end
+   end
+   if hasinit then
+      if not name then
+         return false -- cannot guess the name
+      end
+   else
+      if #luafiles > 1 then
+         return false
+      end
+      if name then
+         if luafiles[1] ~= name .. '.lua' then
+            return false
+         end
+      else
+         if luafiles[1] == 'init.lua' then
+            return false
+         end
+      end
+   end
+   return true, luafiles, hasinit
+end
+
+function luapack.install(name, path)
+   local success, luafiles, hasinit = luapack.isvalid(name, path)
+   if not success then
+      error('bizarre internal error (the package now appears invalid)')
+   end
+   if hasinit then
+      exec(mkdir .. paths.concat(paths.install_lua_path, name))
+      for _,f in ipairs(luafiles) do
+         exec(string.format('%s "%s" "%s"',
+                            cp,
+                            paths.concat(path, f),
+                            paths.concat(paths.install_lua_path, name, f)))
+      end
+   else
+      exec(string.format('%s "%s" "%s"',
+                         cp,
+                         paths.concat(path, luafiles[1]),
+                         paths.concat(paths.install_lua_path, luafiles[1])))
+   end
+   info('luapack: installation successful')
+end
+
+-- now execute command
+if command == 'help' then
+
+   print(help)
+   os.exit()
+
+elseif command == 'install' then
+
+   if not arguments[1] then
+      print(help)
+      print()
+      error('please provide a package name or a path to a tar/tgz')
+      os.exit()
+   end
+
+   to_build = {}
+   for i = 1,#arguments do
+      if arguments[i]:find('=') then -- cmake flag
+         configure = configure .. '-D' .. arguments[i] .. ' '
+      else
+         append(to_build, arguments[i])
+      end
+   end
+
+   packages = getpkglist()
+
+   function doit(package)
+      local pkg = packages[package]
+
+      if not pkg then
+         if package:find('http') then
+            pkg = {
+               git = package,
+               commit = 'master',
+               dependencies = {}
+            }
+         else
+            error('could not find package ' .. package .. ' in any of the registered repos')
+            os.exit()
+         end
+      end
+      if pkg.done then
+         info('skipping package: ' .. package .. ', already installed')
+         return
+      end
+
+      if paths.dirp(paths.concat(tmp,package)) then
+         exec(rm .. paths.concat(tmp,package,'build/CMakeCache.txt'))
+         info('upgrading package ' .. package .. ' from: ' .. pkg.git)
+         exec(cd .. paths.concat(tmp,package) .. '; ' ..  git .. ' pull')
+      else
+         info('downloading package ' .. package .. ' from: ' .. pkg.git)
+         exec(git .. ' clone ' .. pkg.git .. ' ' .. paths.concat(tmp,package))
+      end
+
+      if pkg.commit then
+         exec(cd .. paths.concat(tmp,package) .. '; ' .. git .. ' checkout ' .. pkg.commit)
+      end
+
+      if #pkg.dependencies > 0 and not nodeps then
+         info('processing ' .. package .. '\'s dependencies:')
+         for _,name in ipairs(pkg.dependencies) do
+            doit(name)
+         end
+      end
+
+      if paths.filep(paths.concat(paths.concat(tmp, package), 'CMakeLists.txt')) then
+         info('building & deploying')
+         exec(cd .. paths.concat(tmp,package) .. '; ' .. configure .. '; ' .. make .. '; ' .. install)
+
+         info('successfully deployed ' .. package)
+         pkg.done = true
+      elseif luapack.isvalid(package, paths.concat(tmp, package)) then
+         luapack.install(package, paths.concat(tmp, package))
+      else
+         error('invalid torch package')
+      end
+   end
+
+   for _,package in ipairs(to_build) do
+      doit(package)
+   end
+
+elseif command == 'download' then
+
+   if not arguments[1] then
+      print(help)
+      print()
+      error('please provide a package name or a path to a tar/tgz')
+      os.exit()
+   end
+
+   package = arguments[1]
+
+   if package:find('%.tar$') or package:find('%.tgz$') or package:find('%.tar.gz$') then
+      error('only supporting git repos for now')
+      os.exit()
+   end
+
+   packages = getpkglist()
+
+   pkg = packages[package]
+   if not pkg then
+      error('could not find package ' .. package .. ' in any of the registered repos')
+      os.exit()
+   end
+
+   if paths.dirp(package) or paths.filep(package) then
+      error('directory ' .. package .. ' already exists, aborting...')
+      os.exit()
+   end
+
+   info('downloading package ' .. package .. ' from: ' .. pkg.git)
+   exec(git .. ' clone ' .. pkg.git .. ' ' .. package)
+
+   if pkg.commit then
+      exec(cd .. package .. '; ' .. git .. ' checkout ' .. pkg.commit)
+   end
+
+elseif command == 'build' then
+
+   found = '.'
+
+   if arguments[1] and not arguments[1]:find('=') then
+      found = arguments[1]
+   end
+
+   if not paths.filep(paths.concat(found, 'CMakeLists.txt')) then
+      error('not a valid package, please specify a path to a valid package')
+      os.exit()
+   end
+
+   for i = 1,#arguments do
+      if arguments[i]:find('=') then -- cmake flag
+         configure = configure .. '-D' .. arguments[i] .. ' '
+      end
+   end
+
+   info('building package in ' .. found)
+   exec(cd .. found .. '; ' .. configure .. '; ' .. make)
+
+elseif command == 'deploy' then
+
+   found = '.'
+
+   if arguments[1] and not arguments[1]:find('=') then
+      found = arguments[1]
+   end
+
+   if paths.filep(paths.concat(found, 'CMakeLists.txt')) then
+      for i = 1,#arguments do
+         if arguments[i]:find('=') then -- cmake flag
+            configure = configure .. '-D' .. arguments[i] .. ' '
+         end
+      end
+
+      if not paths.filep(paths.concat(found, 'build', 'CMakeCache.txt')) then
+         info('configuring package in ' .. found)
+         exec(cd .. found .. '; ' .. configure)
+      end
+      info('deploying package in ' .. found)
+      exec(cd .. paths.concat(found,'build') .. '; ' .. make .. '; ' .. install)
+   else
+      local pkgname = arguments[2]
+      if not pkgname then
+         infoarg('warning: for cmake-free lua packages you might want to pass a package name as second argument')
+         infoarg('warning: [usage: torch-pkg deploy [package source path] [package name]]')
+      end
+      if luapack.isvalid(pkgname, found) then
+         luapack.install(pkgname, found)
+      else
+         error('not a valid package, please specify a path to a valid package')
+         os.exit()
+      end
+   end
+
+elseif command == 'list' then
+
+   packages = getpkglist()
+
+   local sorted = {}
+   for name in pairs(packages) do
+      table.insert(sorted,name)
+   end
+   table.sort(sorted, function(a,b) return a<b end)
+
+   print()
+   for _,name in ipairs(sorted) do
+      local pkg = packages[name]
+      info(name)
+      infoarg(pkg.description)
+      infoarg('hosted at: ' .. pkg.git)
+      print()
+   end
+
+elseif command == 'html' then
+
+   packages = getpkglist()
+
+   local sorted = {}
+   for name in pairs(packages) do
+      table.insert(sorted,name)
+   end
+   table.sort(sorted, function(a,b) return a<b end)
+
+   local s =
+[[
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head><title>Torch7 Packages</title></head>
+<body style="font-family:helvetica,arial; margin:auto; padding:0; width:600px;">
+<h2>Torch7 Packages</h2>
+<p>
+Torch7 has a built-in package management system that makes it very easy for
+anyone to get extra (experimental) packages, and create and distribute yours.
+</p>
+<p>
+To install any of the following packages, simply do: <code>torch-pkg install package</code>.
+For more help on <code>torch-pkg</code>, check out
+<a target="_blank" style="color:#AAA" href="http://www.torch.ch/manual/install/index#the_torch_package_management_system">this page</a>.
+</p>
+<p>
+(This page is automatically generated using: <code>torch-pkg html</code>).
+</p>
+]]
+   for _,name in ipairs(sorted) do
+      local pkg = packages[name]
+      s = s .. '<div style="border-top:1px solid #AAA;'
+                         ..'border-bottom:1px solid #AAA;'
+                         ..'background:#eee;'
+                         ..'padding:10px; margin:15px 0px;">\n'
+      s = s ..     '<h3 style="margin:0;padding:0">' .. name .. '</h3>\n'
+      s = s ..     '<p>' .. pkg.description .. '</p>\n'
+      s = s ..     '<a target="_blank" style="color:#AAA" href="' .. pkg.git .. '">Project Page</a>\n'
+      s = s .. '</div>\n'
+   end
+   s = s .. '</body></html>'
+   local file = 'torchpkg_autogen.html'
+   local f = io.open(file,'w')
+   f:write(s)
+   f:close()
+   info('generated html in: ' .. file)
+
+elseif command == 'dok' then
+
+   packages = getpkglist()
+
+   local sorted = {}
+   for name in pairs(packages) do
+      table.insert(sorted,name)
+   end
+   table.sort(sorted, function(a,b) return a<b end)
+
+   local s =
+[=[
+======= Torch7 Packages =======
+{{anchor:packages.dok}}
+
+Torch7 has a built-in package management system that makes it very easy for
+anyone to get extra (experimental) packages, and create and distribute yours.
+
+To install any of the following packages, simply do: ''torch-pkg install package''.
+For more help on ''torch-pkg'', check out
+[[http://www.torch.ch/manual/install/index#the_torch_package_management_system|this page]].
+
+(This page is automatically generated using: ''torch-pkg dok'').
+]=]
+   for _,name in ipairs(sorted) do
+      local pkg = packages[name]
+      s = s .. '\n==== ' .. name .. ' ==== \n'
+      s = s .. '{{anchor:packages.' .. name .. '}}'
+      s = s .. '\n' .. pkg.description .. '\n'
+      s = s .. '\n[[' .. pkg.git .. '|Project Page]]\n'
+   end
+   local file = 'torchpkg_autogen.dok'
+   local f = io.open(file,'w')
+   f:write(s)
+   f:close()
+   info('generated dok in: ' .. file)
+
+elseif command == 'search' then
+
+   if not arguments[1] then
+      print(help)
+      print()
+      error('please provide a package name or a path to a tar/tgz')
+      os.exit()
+   end
+
+   package = arguments[1]
+
+   packages = getpkglist()
+
+   if not packages[package] then
+      error('package could not be found in any of the registered repos')
+      os.exit()
+   end
+
+   print()
+   info(package)
+   infoarg(packages[package].description)
+   infoarg('hosted at: ' .. packages[package].git)
+   print()
+
+elseif command == 'add' then
+
+   if not arguments[1] then
+      print(help)
+      print()
+      error('please provide at least one valid URL')
+      os.exit()
+   end
+
+   info('added url(s) to user config:')
+
+   f = io.open(configfile)
+   conf = f:read('*all')
+   f:close()
+
+   for _,arg in ipairs(arguments) do
+      for _,url in ipairs(pkgconfig.urls) do
+         if url == arg then
+            bypass = true
+         end
+      end
+      if bypass then
+         infoarg('skipping ' .. arg .. ' (already exists)')
+      else
+         conf = conf .. 'table.insert(pkgconfig.urls, "' .. arg .. '")\n'
+         infoarg(arg)
+      end
+   end
+
+   f = io.open(configfile,'w')
+   f:write(conf)
+   f:close()
+
+end

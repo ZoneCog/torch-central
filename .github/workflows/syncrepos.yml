@@ -1,0 +1,17 @@
+name: Fetch & Sync Repositories
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  fetch:
+    uses: ./.github/workflows/fetch.yml
+
+  sync:
+    needs: fetch
+    uses: ./.github/workflows/sync.yml
+    with:
+      org_name: elizaOS

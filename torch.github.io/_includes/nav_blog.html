@@ -1,0 +1,15 @@
+<div class="nav-docs nav-blog">
+  <div class="nav-docs-section">
+    <ul>
+      {% for post in site.posts %}
+        <li>
+	  <span class="post-date">{{ post.date | date: "%b %-d, %Y" }}</span>
+	  <a class="post-link" href="{{ post.url | prepend: torch.ch/ }}">{{ post.title }}</a>
+	  <br>
+	  {{ post.excerpt }}
+	  <img src="{{post.picture}}"></img>
+	</li>
+      {% endfor %}
+    </ul>
+  </div>
+</div>

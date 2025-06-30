@@ -1,0 +1,14 @@
+- title: Quick Start
+  items:
+  - id: getting-started
+    title: Getting started with Torch
+  - id: five-simple-examples
+    title: Five simple examples
+- title: Documentation
+  items: 
+  - id: tutorials-demos
+    title: Tutorials, Demos, Examples
+  - id: package-docs
+    title: Package Documentation
+  - id: developer-docs
+    title: Developer Documentation

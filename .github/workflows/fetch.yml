@@ -12,9 +12,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Fetch repository list from elizaOS organization
+    - name: Fetch repository list from torch organization
       run: |
-        curl -s https://api.github.com/orgs/elizaOS/repos?per_page=100 | jq -r '.[].name' > repo_list.txt
+        curl -s https://api.github.com/orgs/torch/repos?per_page=100 | jq -r '.[].name' > repo_list.txt
 
     - name: Upload repo_list.txt
       uses: actions/upload-artifact@v4
